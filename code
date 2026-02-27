@@ -1,0 +1,187 @@
+import network
+import socket
+import time
+import machine
+import utime
+from machine import Pin, ADC, I2C
+from urllib.parse import unquote
+
+i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=100000)
+LCD_ADDR = 0x27
+
+def lcd_write(cmd, mode=0):
+    backlight = 0x08
+    for nib in [cmd & 0xF0, (cmd << 4) & 0xF0]:
+        i2c.writeto(LCD_ADDR, bytes([nib | backlight | (0x04 if mode else 0x00)]))
+        i2c.writeto(LCD_ADDR, bytes([nib | backlight | (0x00 if mode else 0x00)]))
+
+def lcd_init():
+    lcd_write(0x33); time.sleep(0.005)
+    lcd_write(0x32); time.sleep(0.005)
+    lcd_write(0x28); time.sleep(0.005)
+    lcd_write(0x0C); time.sleep(0.005)
+    lcd_write(0x06); time.sleep(0.005)
+    lcd_write(0x01); time.sleep(0.005)
+
+def lcd_clear():
+    lcd_write(0x01)
+    time.sleep(0.002)
+
+def lcd_set_cursor(line, pos):
+    lcd_write(0x80 + pos if line == 0 else 0xC0 + pos)
+
+def lcd_print(text):
+    for char in text:
+        lcd_write(ord(char), 1)
+
+def lcd_update_display(light_percent, light_description):
+    lcd_clear()
+    lcd_set_cursor(0, 0)
+    lcd_print(f"Light:{light_percent}%")
+    lcd_set_cursor(1, 0)
+    lcd_print(light_description[:16])
+
+def lcd_display_custom_text(line1_text, line2_text=""):
+    lcd_clear()
+    lcd_set_cursor(0, 0)
+    lcd_print(line1_text[:16])
+    if line2_text:
+        lcd_set_cursor(1, 0)
+        lcd_print(line2_text[:16])
+
+formatted_date = "Time not set"
+print(formatted_date)
+
+intled = machine.Pin("LED", machine.Pin.OUT)
+light_sensor = ADC(26)
+
+ssid = 'Movavi_School'
+password = 'thebest_it_school'
+
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(ssid, password)
+
+try:
+    lcd_init()
+    lcd_print("Ready!")
+    time.sleep(1)
+    lcd_clear()
+    print("LCD initialized")
+except Exception as e:
+    print(f"LCD error: {e}")
+
+html_template = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Pico W</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }}
+        .container {{ max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; text-align: center; }}
+        .control-group {{ margin: 20px 0; padding: 15px; background: #f9f9f9; border-radius: 5px; }}
+        h2 {{ color: #555; }}
+        a {{ display: inline-block; padding: 10px 20px; margin: 5px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }}
+        a:hover {{ background: #0056b3; }}
+        .status {{ font-weight: bold; color: #007bff; }}
+        .light-level {{ font-size: 18px; margin: 10px 0; }}
+        .light-bar {{ width: 100%; height: 20px; background: #ddd; border-radius: 10px; overflow: hidden; }}
+        .light-fill {{ height: 100%; background: linear-gradient(90deg, #ffcc00, #ff6600); transition: width 0.3s; }}
+        .refresh-btn {{ background: #28a745; }}
+        .refresh-btn:hover {{ background: #1e7e34; }}
+        input[type="text"] {{ width: 70%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; }}
+        input[type="submit"] {{ padding: 10px 20px; background: #17a2b8; color: white; border: none; border-radius: 5px; cursor: pointer; }}
+        input[type="submit"]:hover {{ background: #138496; }}
+        .lcd-display {{ background: #001100; color: #00ff00; padding: 10px; font-family: monospace; border-radius: 5px; margin: 10px 0; }}
+    </style>
+    <script>
+        function refreshPage() {{ location.reload, #(); }}
+        setInterval(refreshPage, 5000);
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Pico W - Light Monitor</h1>
+        
+        <div class="control-group">
+            <h2>LED Control</h2>
+            <a href='/light/on'>Turn Light On</a>
+            <a href='/light/off'>Turn Light Off</a>
+            <p class="status">{led_status}</p>
+        </div>
+        
+        <div class="control-group">
+            <h2>Light Sensor</h2>
+            <div class="light-level">Light Level: {light_value} ({light_percent}%)</div>
+            <div class="light-bar"><div class="light-fill" style="width: {light_percent}%"></div></div>
+            <p style="text-align: center; color: #666;">Raw ADC Value: {light_raw}</p>
+            <a href='/' class='refresh-btn'>Refresh Now</a>
+        </div>
+        
+        <div class="control-group">
+            <h2>LCD Display Control</h2>
+            <div class="lcd-display">
+                Line 1: {lcd_line1}<br>
+                Line 2: {lcd_line2}
+            </div>
+            <form action='/display' method='POST'>
+                <input type='text' name='line1' placeholder='Line 1 text (max 16 chars)' maxlength='16' value='{line1_value}'><br>
+                <input type='text' name='line2' placeholder='Line 2 text (max 16 chars)' maxlength='16' value='{line2_value}'><br>
+                <input type='submit' value='Update LCD'>
+            </form>
+            <a href='/display/clear'>Clear LCD</a>
+            <a href='/display/sensor'>Show Sensor Data</a>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+def read_light_level():
+    readings = [light_sensor.read_u16() for _ in range(10)]
+    time.sleep(0.01)
+    avg = sum(readings) // len(readings)
+    percent = int((65535 - avg) / 65535 * 100)
+    desc = ["Very Dark", "Dark", "Moderate", "Bright", "Very Bright"][min(percent // 20, 4)]
+    return avg, percent, desc
+
+def parse_post_request(request):
+    """Parse POST request data and return dictionary of parameters"""
+    try:
+        # Find the body of the POST request (after empty line)
+        body_start = request.find('\r\n\r\n')
+        if body_start == -1:
+            return {}
+        
+        body = request[body_start + 4:]
+        params = {}
+        
+        # Parse key=value pairs
+        for pair in body.split('&'):
+            if '=' in pair:
+                key, value = pair.split('=', 1)
+                # URL decode the value
+                try:
+                    value = unquote(value.replace('+', ' '))
+                except:
+                    value = value.replace('+', ' ')
+                params[key] = value
+        
+        return params
+    except Exception as e:
+        print(f"Error parsing POST: {e}")
+        return {}
+
+max_wait = 10
+while max_wait > 0:
+    if wlan.status() < 0 or wlan.status() >= 3:
+        break
+    max_wait -= 1
+    print('waiting for connection...')
+    time.sleep(1)
+
+if wlan.status() != 3:
+    raise RuntimeError('network connection failed')
+else:
+    print('connected')
+    print('ip =', wlan
