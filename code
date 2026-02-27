@@ -2,9 +2,24 @@ import network
 import socket
 import time
 import machine
-import utime
 from machine import Pin, ADC, I2C
-from urllib.parse import unquote
+
+def url_decode(s):
+    s = s.replace('+', ' ')
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == '%' and i + 2 < len(s):
+            try:
+                result.append(chr(int(s[i+1:i+3], 16)))
+                i += 3
+            except:
+                result.append(s[i])
+                i += 1
+        else:
+            result.append(s[i])
+            i += 1
+    return ''.join(result)
 
 i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=100000)
 LCD_ADDR = 0x27
@@ -49,9 +64,6 @@ def lcd_display_custom_text(line1_text, line2_text=""):
         lcd_set_cursor(1, 0)
         lcd_print(line2_text[:16])
 
-formatted_date = "Time not set"
-print(formatted_date)
-
 intled = machine.Pin("LED", machine.Pin.OUT)
 light_sensor = ADC(26)
 
@@ -61,6 +73,20 @@ password = 'thebest_it_school'
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
 wlan.connect(ssid, password)
+
+max_wait = 10
+while max_wait > 0:
+    if wlan.status() < 0 or wlan.status() >= 3:
+        break
+    max_wait -= 1
+    print('waiting for connection...')
+    time.sleep(1)
+
+if wlan.status() != 3:
+    raise RuntimeError('network connection failed')
+else:
+    print('connected')
+    print('ip =', wlan.ifconfig()[0])
 
 try:
     lcd_init()
@@ -75,6 +101,8 @@ html_template = """<!DOCTYPE html>
 <html>
 <head>
     <title>Pico W</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }}
         .container {{ max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
@@ -95,7 +123,7 @@ html_template = """<!DOCTYPE html>
         .lcd-display {{ background: #001100; color: #00ff00; padding: 10px; font-family: monospace; border-radius: 5px; margin: 10px 0; }}
     </style>
     <script>
-        function refreshPage() {{ location.reload, #(); }}
+        function refreshPage() {{ location.reload(); }}
         setInterval(refreshPage, 5000);
     </script>
 </head>
@@ -146,9 +174,7 @@ def read_light_level():
     return avg, percent, desc
 
 def parse_post_request(request):
-    """Parse POST request data and return dictionary of parameters"""
     try:
-        # Find the body of the POST request (after empty line)
         body_start = request.find('\r\n\r\n')
         if body_start == -1:
             return {}
@@ -156,15 +182,10 @@ def parse_post_request(request):
         body = request[body_start + 4:]
         params = {}
         
-        # Parse key=value pairs
         for pair in body.split('&'):
             if '=' in pair:
                 key, value = pair.split('=', 1)
-                # URL decode the value
-                try:
-                    value = unquote(value.replace('+', ' '))
-                except:
-                    value = value.replace('+', ' ')
+                value = url_decode(value)
                 params[key] = value
         
         return params
@@ -172,16 +193,85 @@ def parse_post_request(request):
         print(f"Error parsing POST: {e}")
         return {}
 
-max_wait = 10
-while max_wait > 0:
-    if wlan.status() < 0 or wlan.status() >= 3:
-        break
-    max_wait -= 1
-    print('waiting for connection...')
-    time.sleep(1)
+led_state = False
+lcd_line1 = "Hello"
+lcd_line2 = "World!"
 
-if wlan.status() != 3:
-    raise RuntimeError('network connection failed')
-else:
-    print('connected')
-    print('ip =', wlan
+def handle_request(request):
+    global led_state, lcd_line1, lcd_line2
+    
+    request_str = request.decode('utf-8')
+    
+    if '/light/on' in request_str:
+        led_state = True
+        intled.value(1)
+    elif '/light/off' in request_str:
+        led_state = False
+        intled.value(0)
+    
+    if '/display/clear' in request_str:
+        lcd_clear()
+        lcd_line1 = ""
+        lcd_line2 = ""
+    elif '/display/sensor' in request_str:
+        _, percent, desc = read_light_level()
+        lcd_update_display(percent, desc)
+        lcd_line1 = f"Light:{percent}%"
+        lcd_line2 = desc[:16]
+    elif 'POST' in request_str and '/display' in request_str:
+        params = parse_post_request(request_str)
+        if 'line1' in params:
+            lcd_line1 = params['line1'][:16]
+        if 'line2' in params:
+            lcd_line2 = params['line2'][:16]
+        lcd_display_custom_text(lcd_line1, lcd_line2)
+    
+    light_raw, light_percent, light_desc = read_light_level()
+    
+    html = html_template.format(
+        led_status="ON" if led_state else "OFF",
+        light_value=light_desc,
+        light_percent=light_percent,
+        light_raw=light_raw,
+        lcd_line1=lcd_line1 if lcd_line1 else "(empty)",
+        lcd_line2=lcd_line2 if lcd_line2 else "(empty)",
+        line1_value=lcd_line1,
+        line2_value=lcd_line2
+    )
+    
+    return html.encode('utf-8')
+
+def start_web_server():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('', 80))
+    s.listen(5)
+    
+    print('Web server started')
+    print('Open http://{} in your browser'.format(wlan.ifconfig()[0]))
+    
+    while True:
+        try:
+            conn, addr = s.accept()
+            print(f'Connection from {addr}')
+            
+            request = conn.recv(1024)
+            response = handle_request(request)
+            
+            conn.send('HTTP/1.1 200 OK\r\n')
+            conn.send('Content-Type: text/html; charset=utf-8\r\n')
+            conn.send('Connection: close\r\n\r\n')
+            conn.sendall(response)
+            conn.close()
+            
+        except Exception as e:
+            print(f'Error: {e}')
+            if 'conn' in locals():
+                conn.close()
+
+if __name__ == '__main__':
+    try:
+        start_web_server()
+    except KeyboardInterrupt:
+        print('\nStopped by user')
+        lcd_clear()
+        lcd_print("Stopped!")
